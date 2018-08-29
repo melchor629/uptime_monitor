@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Uptime monitor</title>
+    <link rel="stylesheet" type="text/css" href="https://cdnjs.cloudflare.com/ajax/libs/c3/0.6.7/c3.min.css">
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/dygraph/2.1.0/dygraph.min.css" />
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.1.3/css/bootstrap.min.css" integrity="sha384-MCw98/SFnGE8fJT3GXwEOngsV7Zt27NXFoaoApmYm81iuXoPkFOJwJ8ERdknLPMO" crossorigin="anonymous">
+    <style>
+    #tables > div {
+        min-height: 300px
+    }
+
+    #tables > div #chart-label {
+        text-align: center;
+        min-height: 30px;
+        display: block !important;
+    }
+
+    #sidebar > a {
+        overflow-wrap: break-word;
+    }
+
+    .inner-sidebar {
+        max-height: calc(100vh - 10px);
+        margin-bottom: -1.5rem;
+        position: sticky;
+        overflow-y: auto;
+        top: 10px;
+    }
+    </style>
+</head>
+<body>
+    <div class="container-fluid mt-4 mb-4">
+        <div class="row">
+            <div class="col text-center">
+                <h1 class="display-2">
+                    Uptime monitor
+                </h1>
+                <p class="lead">
+                    Show statistics of uptime for every device found on your network.<br/>
+                    Select some or all of them in a nice, and very good synchronized, graphs.<br/>
+                    Display from now to whatever time you want with the three input numbers.<br/>
+                    Have fun :)
+                </p>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-12 col-md-3 col-lg-2">
+                <div class="inner-sidebar">
+                    <p>Oldest value from:</p>
+                    <div class="input-group input-group-sm mb-2">
+                        <input class="form-control" type="number" min="0" max="28" step="1" id="past-time-d" value="0">
+                        <div class="input-group-append">
+                            <span class="input-group-text">days</span>
+                        </div>
+                    </div>
+                    <div class="input-group input-group-sm mb-2">
+                        <input class="form-control" type="number" min="0" max="24" step="1" id="past-time-h" value="24">
+                        <div class="input-group-append">
+                            <span class="input-group-text">hours</span>
+                        </div>
+                    </div>
+                    <div class="input-group input-group-sm mb-2">
+                        <input class="form-control" type="number" min="0" max="59" step="1" id="past-time-m" value="0">
+                        <div class="input-group-append">
+                            <span class="input-group-text">minutes</span>
+                        </div>
+                    </div>
+
+                    <div class="input-group input-group-sm mt-2 mb-2">
+                        <label for="update-every">Update every:</label>
+                        <select id="update-every">
+                            <option value="5">5 seconds</option>
+                            <option value="15" default>15 seconds</option>
+                            <option value="30">30 seconds</option>
+                            <option value="45">45 seconds</option>
+                            <option value="60">1 minute</option>
+                            <option value="120">2 minutes</option>
+                            <option value="300">5 minutes</option>
+                        </select>
+                    </div>
+
+                    <hr/>
+
+                    <button type="button" class="btn btn-outline-warning btn-block mb-2" id="select-all">Toggle all</button>
+
+                    <div class="list-grup" id="sidebar"></div>
+                </div>
+            </div>
+            <div class="col-12 col-md-9 col-lg-10">
+                <div class="row" id="tables"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" integrity="sha384-q8i/X+965DzO0rT7abK41JStQIAqVgRVzpbzo5smXKp4YfRvH+8abtTE1Pi6jizo" crossorigin="anonymous"></script>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/dygraph/2.1.0/dygraph.min.js"></script>
+    <script src="synchronizer.js"></script>
+    <script>
+        (() => {
+            const legendFormatter = (data) => {
+                if(!data.x) return '';
+                return data.xHTML + ' - ' + (data.series[0].yHTML || '<span class="text-warning">No metrics</span>');
+            };
+            const valueFormatter = {
+                X: (x) => new Date(x).toLocaleString(),
+                Y1: (y) => y < 0.5 ? '<span class="text-secondary">Was off</span>' : '<span class="text-success">Was on</span>',
+            };
+            const storage = {
+                getItem: (key, def) => {
+                    const value = window.localStorage.getItem(key);
+                    if(value) {
+                        return JSON.parse(value);
+                    }
+                    return def;
+                },
+                setItem: (key, value) => {
+                    window.localStorage.setItem(key, JSON.stringify(value));
+                }
+            };
+
+            class Dashboard {
+                constructor($tables, $sidebar) {
+                    this.$tables = $tables;
+                    this.$sidebar = $sidebar;
+                    this.selections = [];
+                    this.boards = [];
+
+                    this._resizeCharts = this._resizeCharts.bind(this);
+                    this._gatherValues = this._gatherValues.bind(this);
+                    this._changeBackTime = this._changeBackTime.bind(this);
+                    this._selectAll = this._selectAll.bind(this);
+                    this._changeInterval = this._changeInterval.bind(this);
+
+                    const initialInterval = storage.getItem('interval', 15);
+                    const initialBackTime = storage.getItem('backTime', { h: 24, m: 0, d: 0 });
+                    $sidebar.parent().find('#past-time-d').val(initialBackTime.d);
+                    $sidebar.parent().find('#past-time-h').val(initialBackTime.h);
+                    $sidebar.parent().find('#past-time-m').val(initialBackTime.m)
+                    $sidebar.parent().find('#update-every').val(initialInterval);
+
+                    $sidebar.parent().find('#past-time-d').change(this._changeBackTime);
+                    $sidebar.parent().find('#past-time-h').change(this._changeBackTime);
+                    $sidebar.parent().find('#past-time-m').change(this._changeBackTime).change();
+                    $sidebar.parent().find('#select-all').click(this._selectAll);
+                    $sidebar.parent().find('#update-every').change(this._changeInterval).change();
+
+                    $(window).resize(this._resizeCharts);
+                }
+
+                fill({ hosts }) {
+                    this.hosts = hosts;
+                    this.selections = this.hosts.map(() => false);
+                    this._fillSidebar();
+                    this._fillBoard();
+                }
+
+                get selectedHosts() {
+                    return this.hosts.filter((_, i) => this.selections[i]);
+                }
+
+                _fillSidebar() {
+                    this.$tables.empty();
+                    this.hosts.forEach((entry, i) => {
+                        this.$sidebar.append(`<a href="#" id="sidebar-link-${i}" data-i="${i}" class="list-group-item list-group-item-action">${entry.hostname || entry.ip}</a>`);
+                    });
+                    this.hosts = this.hosts.map((entry, i) => ({
+                        ...entry,
+                        $button: this.$sidebar.find(`#sidebar-link-${i}`),
+                    }));
+                    this.hosts.forEach((entry, i) => {
+                        entry.$button.click((e) => {
+                            e.preventDefault();
+                            if($(e.target).hasClass('disabled')) return;
+                            if(this.selections[i]) {
+                                entry.$button.removeClass('active');
+                                this.selections[i] = false;
+                            } else {
+                                entry.$button.addClass('active');
+                                this.selections[i] = true;
+                            }
+                            this._fillBoard();
+                        });
+                    });
+                }
+
+                _fillBoard() {
+                    let add = this.selectedHosts.filter(e => this.boards.filter(o => o.mac === e.mac).length === 0);
+                    const rem = this.boards.filter(e => this.selectedHosts.filter(o => o.mac === e.mac).length === 0);
+                    if(this._dygsync) {
+                        this._dygsync.detach();
+                        this._dygsync = null;
+                    }
+                    rem.forEach(b => b.$chart.destroy());
+                    rem.forEach(b => b.$elem.parent().remove());
+                    this.boards = this.boards.filter(e => rem.filter(o => o.mac === e.mac).length === 0);
+
+                    add.forEach(entry => {
+                        this.$tables.append(`<div class="col-12 col-md-6 mb-4" id="${entry.mac.replace(/:/g, '-')}"><h4>${entry.hostname || entry.ip}</h2><div id="chart"></div><div id="chart-label"></div></div>`);
+                    });
+                    add = add.map(entry => ({
+                        ...entry,
+                        $elem: this.$tables.find('#' + entry.mac.replace(/:/g, '-') + ' #chart')
+                    }));
+                    add = add.map(entry => ({
+                        ...entry,
+                        $chart: new Dygraph(
+                            entry.$elem[0],
+                            [[new Date('1970-01-01'), 0]],
+                            {
+                                axes: {
+                                    y: {
+                                        drawGrid: false,
+                                        drawAxis: false,
+                                        valueRange: [-0.01, 1.01],
+                                    }
+                                },
+                                xlabel: null,
+                                ylabel: null,
+                                labelsDiv: entry.$elem.parent().find('#chart-label')[0],
+                                legendFormatter,
+                                valueFormatter: (num, _, s) => valueFormatter[s](num),
+                                width: entry.$elem.parent().width(),
+                                height: 200,
+                            }
+                        )
+                    }));
+                    setTimeout(() => this._gatherValues(add), 0);
+                    this.boards = this.boards.concat(add);
+
+                    if(this.boards.length > 1) {
+                        this._dygsync = Dygraph.synchronize(this.boards.map(({ $chart }) => $chart));
+                    }
+                }
+
+                _resizeCharts() {
+                    requestAnimationFrame(() => {
+                        console.log('Resizing graphs...');
+                        this.boards.forEach(({ $elem, $chart }) => {
+                            $chart.updateOptions({ width: $elem.parent().width() });
+                        });
+                    });
+                }
+
+                _gatherValues(newBoards) {
+                    console.log('Fetching new values...');
+                    const path = window.location.pathname.replace('index.html', '').replace(/\/$/, '');
+                    (newBoards || this.boards).forEach(({ mac, $chart }) => {
+                        this._loading++;
+                        fetch(`${path}/values/${mac}?pastTime=${this.backTime}&fill=null&time=${this.backTimeGroup}`).then(res => res.json()).then(data => {
+                            const pairs = data.results[0].series[0].values;
+                            try {
+                                $chart.updateOptions({ 'file': pairs.map(a => [new Date(a[0]), a[1]]) });
+                                $chart.resetZoom();
+                            } catch(e) {}
+                            this._loading--;
+                        });
+                    });
+                }
+
+                _changeBackTime(e) {
+                    e.preventDefault();
+
+                    const d = Number(this.$sidebar.parent().find('#past-time-d').val());
+                    const h = Number(this.$sidebar.parent().find('#past-time-h').val());
+                    const m = Number(this.$sidebar.parent().find('#past-time-m').val());
+
+                    let s = d * 24 * 60 * 60 + h * 60 * 60 + m * 60;
+
+                    if(s < 30) {
+                        this.$sidebar.parent().find('#back-time-h').val('24');
+                        s = 60 * 60* 24;
+                    }
+
+                    this.backTime = s;
+                    this.backTimeGroup = s < 12 * 3600 ? 1 : (s < 24 * 3600 ? 2 : s < 48 * 3600 ? 3 : 4);
+                    setTimeout(() => this._gatherValues(), 0);
+                    console.info('New backTime is:', this.backTime);
+                    console.info('New backTimeGroup is:', this.backTimeGroup);
+                    storage.setItem('backTime', { d, h, m });
+                }
+
+                _selectAll(e) {
+                    e.preventDefault();
+                    const value = this.selections.reduce((a, b) => a && b, true);
+                    this.selections = this.selections.map(_ => !value);
+                    this.hosts.forEach(({ $button }) => {
+                        !value ? $button.addClass('active') : $button.removeClass('active');
+                    });
+                    !value ? $(e.target).removeClass('btn-outline-warning').addClass('btn-warning') : $(e.target).addClass('btn-outline-warning').removeClass('btn-warning')
+                    this._fillBoard();
+                }
+
+                _changeInterval(e) {
+                    e.preventDefault();
+                    if(this._interval) clearInterval(this._interval);
+                    const time = Number($(e.target).val());
+                    this._interval = setInterval(() => this._gatherValues(), time * 1000);
+                    console.info('New interval is:', time);
+                    storage.setItem('interval', time);
+                }
+
+                get _loading() {
+                    return this._loading_thing || 0;
+                }
+
+                set _loading(value) {
+                    this._loading_thing = value;
+                    const $el = this.$sidebar.parent().find('input, a, button');
+                    if(value !== 0) {
+                        $el.prop('disabled', true).addClass('disabled');
+                    } else {
+                        $el.prop('disabled', false).removeClass('disabled');
+                    }
+                }
+            }
+
+            window.dashboard = new Dashboard($('#tables'), $('#sidebar'));
+
+            const path = window.location.pathname.replace('index.html', '').replace(/\/$/, '');
+            fetch(`${path}/hosts`).then(res => res.json()).then((data) => {
+                window.dashboard.fill(data);
+            }).catch(e => console.error(e));
+        })();
+    </script>
+</body>
+</html>

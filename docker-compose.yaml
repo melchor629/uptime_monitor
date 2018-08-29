@@ -1,0 +1,91 @@
+version: '3'
+
+services:
+  fing:
+    image: fing
+    build:
+      context: ./fing
+    network_mode: host
+    command:
+      - fing
+      - -d
+      - "true"
+      - -n
+      - 192.168.2.0/24
+      - -o
+      - table,csv,/fing/data.csv
+    volumes:
+      - "fing_data:/fing"
+    restart: always
+
+  influxdb:
+    image: influxdb
+    volumes:
+      - "db_data:/var/lib/influxdb"
+      - "./influxdb:/docker-entrypoint-initdb.d"
+    environment:
+      INFLUXDB_DB: activity
+    restart: always
+
+  parser:
+    image: fing-parser
+    build:
+      context: ./fing-parser
+    volumes:
+      - "fing_data:/fing"
+    depends_on:
+      - influxdb
+      - redis
+    restart: always
+
+  monitor:
+    image: node:8-slim
+    volumes:
+      - "./backend:/app"
+    command: bash -c "cd /app && npm install && node index"
+    networks:
+      - default
+      - traefiknet
+    environment:
+      REDIS_HOST: redis
+      REDIS_DB: 0
+      INFLUXDB_HOST: influxdb
+      INFLUXDB_PORT: 8086
+      INFLUXDB_DB: activity
+    labels:
+      - "traefik.enable=true"
+      - "traefik.frontend.priority=30"
+      - "traefik.frontend.rule=PathPrefixStrip:/uptime/"
+      - "traefik.docker.network=traefiknet"
+      - "traefik.backend=monitor"
+      - "traefik.port=3000"
+    restart: always
+
+  #chronograf:
+  #  image: chronograf
+  #  build:
+  #    context: ./chronograf
+  #  volumes:
+  #    - "chronograf_data:/var/lib/chronograf"
+  #  networks:
+  #    - default
+  #    - traefiknet
+  #  labels:
+  #    - "traefik.enable=true"
+  #    - "traefik.frontend.rule=Host:chronograph,chronograph.local"
+  #    - "traefik.docker.network=traefiknet"
+  #    - "traefik.backend=chronograf"
+  #    - "traefik.port=8888"
+
+  redis:
+    image: redis
+    restart: always
+
+volumes:
+  db_data:
+  fing_data:
+  #chronograf_data:
+
+networks:
+  traefiknet:
+    external: true

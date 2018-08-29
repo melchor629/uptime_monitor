@@ -1,0 +1,1 @@
+CREATE CONTINUOUS QUERY "cq_daily" ON "activity" BEGIN  SELECT sum("state") as "uptime" INTO "monthly_rp"."daily_activity" FROM (SELECT round(mean("state")) as "state" FROM "activity" GROUP BY time(1m),mac fill(previous)) GROUP BY time(24h),mac  END
